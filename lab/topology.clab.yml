@@ -1,0 +1,17 @@
+name: arista-ai-spine-demo
+
+topology:
+  nodes:
+    spine1:
+      kind: ceos
+      image: ceos:latest
+      startup-config: configs/spine1.cfg
+
+    leaf1:
+      kind: ceos
+      image: ceos:latest
+      startup-config: configs/leaf1.cfg
+
+  links:
+    # The physical link between spine and leaf (like a GPU-to-GPU uplink)
+    - endpoints: ["spine1:eth1", "leaf1:eth1"]
