@@ -178,4 +178,31 @@ The `topo -m` output shows a matrix of GPU pairs. Look for `NV4` (NVLink generat
 
 ---
 
+## Why NVIDIA won — and why it's not just the hardware
+
+GPUs were designed for graphics: every pixel needs the same operations on different data. One instruction, 32 pixels, zero divergence. Perfect fit.
+
+Around 2006–2007, researchers noticed matrix multiplication — the backbone of scientific computing and ML — has the same property. Every output element is the same formula on different data. NVIDIA released CUDA in 2007 to let people write general code for the GPU without going through the graphics API. That's the origin of GPGPU (General Purpose GPU).
+
+Transformers arrived later and turned out to be almost pathologically well-suited to this hardware — attention is matrix multiplication all the way down. GPUs weren't designed for AI; AI researchers found a way to express everything as the one operation GPUs were already built to do.
+
+### The real moat: CUDA, not silicon
+
+Many serious attempts at "something different" exist:
+
+| Chip | Idea | Reality |
+|------|------|---------|
+| Google TPU | Systolic array — designed purely for matrix multiply, no GPU baggage | Technically elegant; locked inside Google Cloud |
+| Cerebras | Wafer-scale chip (dinner-plate sized) — eliminate inter-chip bandwidth cliffs entirely | Impressive engineering; very niche |
+| Groq | Deterministic execution, no caches — extreme inference throughput | No training story |
+| Tenstorrent (Jim Keller) | RISC-V based AI chip — most credible long-term challenger | Still early |
+
+They all hit the same wall: **even if your chip is faster, you're asking researchers to rewrite everything.** PyTorch, JAX, TensorFlow — all CUDA-native. 15 years of optimised libraries (cuDNN, cuBLAS, NCCL), tutorials, tooling, institutional knowledge. Nobody rewrites working code.
+
+Jensen Huang made one deliberate non-lucky bet: he kept funding CUDA through years where nobody was using it for AI and it looked like a money pit. The luck was that the workload materialised. The moat was the decade of software investment before anyone knew it would.
+
+**The broader pattern:** it is not the most elegant solution that wins. It is the solution with the most momentum after the critical window closes. Better hardware loses to entrenched software ecosystems repeatedly throughout computing history (VHS vs Betamax, x86 vs cleaner ISAs, Windows vs everything). NVIDIA is the current example.
+
+---
+
 **Next:** [Block 2 — NVIDIA Software Stack](block2-nvidia-software-stack.md) — how NCCL exploits this hardware, and what DCGM exposes for observability.
