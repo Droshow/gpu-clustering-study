@@ -51,6 +51,72 @@ NCCL (NVIDIA Collective Communications Library) implements the collective operat
 
 Each GPU holds a copy of the model. Each GPU processes a different batch of data and computes gradients. All-reduce takes the gradients from all GPUs, sums them, and distributes the result back to all GPUs. Every GPU ends the step with identical weights. This happens every single training iteration.
 
+> **DevOps perspective — what "processes a batch and computes gradients" means:**
+>
+> You have a massive dataset — say, 1 million images. Instead of one GPU processing all of them sequentially, the dataset is split:
+> GPU0 processes images 1–1000, GPU1 processes 1001–2000, and so on. Each GPU runs a forward pass on its shard and computes **gradients** — a tensor of floats, one per model parameter, that says "adjust this weight by this much."
+>
+> The gradients from each GPU are *different* because each GPU saw different data. The model can only update usefully if all GPUs agree on a combined gradient — that's what all-reduce delivers.
+>
+> The sequence as an infra concern:
+> ```
+> 1. Dataset split → each GPU gets a shard
+> 2. Each GPU: forward pass → backward pass → local gradients   (SM util: high)
+> 3. NCCL all-reduce: sum all gradients, distribute to every GPU (SM util: near zero — waiting on network)
+> 4. Each GPU updates its weights with the combined gradient
+> 5. Repeat every iteration
+> ```
+>
+> Step 3 is where your network utilisation spikes and `DCGM_FI_DEV_GPU_UTIL` drops. The GPUs are done computing and sitting idle waiting for ~140GB to move across the fabric. That idle period is what you are measuring and trying to minimise.
+
+> **DevOps perspective — tensor vs gradient:**
+>
+> A **tensor** is just the data structure — an n-dimensional array of floats. It is the generic container for everything in deep learning: inputs, outputs, weights, and gradients are all tensors. Think of it like "file" — a config file and a log file are both files.
+>
+> A **gradient** is a tensor with a specific meaning: one float per model parameter, encoding "adjust this weight by this much." It is produced by the backward pass (backpropagation) and answers: if I nudge this weight slightly, how much does the model's error change?
+>
+> Example for a model with 3 weights:
+> ```
+> Weights tensor:   [0.5,  -1.2,  0.8]   ← current model parameters
+> Gradient tensor:  [0.03, -0.1,  0.07]  ← computed adjustments from this batch
+>
+> Weight update:  new_weight = old_weight - (learning_rate × gradient)
+> ```
+>
+> For the infra concern: the "140GB of gradients" flowing through NCCL is simply a tensor of 70 billion floats — one per model parameter. NCCL does not know or care that it is a gradient; it just moves the bytes. What makes it a gradient is what computed it and what the training loop does with it after delivery.
+
+> **DevOps perspective — who actually triggers and executes the all-reduce:**
+>
+> PyTorch is the orchestrator. NCCL is the executor. They have distinct roles:
+>
+> ```
+> PyTorch training loop (running on CPU, coordinating GPU work)
+>   └── loss.backward()        ← tells the GPU to run the backward pass, producing gradients
+>   └── optimizer.step()       ← before updating weights, PyTorch calls NCCL:
+>         └── ncclAllReduce()  ← PyTorch hands the gradient tensor to NCCL
+>               └── NCCL       ← takes over: selects transport (NVLink / IB / RoCE),
+>                                 builds ring topology, executes the transfer across all GPUs
+>               └── returns    ← NCCL gives back the summed gradient tensor
+>   └── weight update          ← PyTorch applies the combined gradient to the weights
+> ```
+>
+> NCCL is not passive — it actively runs a **ring algorithm** where every GPU is simultaneously
+> sender and receiver. Each GPU passes its chunk to the next GPU in the ring, receives a chunk
+> from the previous one, accumulates, and passes it on. After 2(N-1) steps across N GPUs, every
+> GPU holds the complete sum. But NCCL only acts when PyTorch calls it. It has no scheduler of its own.
+>
+> Why SM utilisation drops to near zero at step 3: the GPU SMs finished the backward pass and are
+> idle. Control is with the NIC and NVLink fabric now. The SMs have nothing to execute until NCCL
+> returns and PyTorch can proceed to the weight update.
+>
+> The layer responsibilities:
+>
+> | Layer | Role | Analogy |
+> |-------|------|---------|
+> | PyTorch / JAX | Decides *when* to all-reduce and *what* tensor | Application calling `send()` |
+> | NCCL | Decides *how* to move it, executes the ring | TCP stack handling packet delivery |
+> | NVLink / InfiniBand / RoCE | Physical wire carrying the bytes | The network cable |
+
 ```
 Before:  GPU0[g0]  GPU1[g1]  GPU2[g2]  GPU3[g3]
 After:   GPU0[g0+g1+g2+g3]  GPU1[same]  GPU2[same]  GPU3[same]
