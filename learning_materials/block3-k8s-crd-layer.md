@@ -180,12 +180,69 @@ GPU HBM → PCIe → NIC → wire
 
 The performance difference is significant for large tensor transfers (all-reduce gradients, KV cache transfers for disaggregated inference). GPUDirect RDMA halves the effective latency and removes a major CPU bottleneck.
 
+> **DevOps perspective — what RDMA actually is:**
+>
+> Normal network transfer path:
+> ```
+> Sender CPU → copies data to NIC buffer → wire → Receiver NIC → interrupt → Receiver CPU → copies to app memory
+> ```
+>
+> RDMA path:
+> ```
+> Sender NIC → wire → Receiver NIC → directly into app memory
+>                                     ↑ receiver CPU never involved
+> ```
+>
+> No system call on the receiver. No kernel interrupt. No memory copy. The NIC handles it entirely
+> in hardware using a protocol called **RDMA verbs** (`ibverbs` API) — which is exactly what NCCL
+> calls when `NicClusterPolicy` is deployed correctly.
+>
+> GPUDirect RDMA takes it one step further: the NIC skips host DRAM entirely and reads/writes GPU
+> HBM directly over PCIe. The CPU is completely uninvolved in moving the gradient tensor.
+>
+> The infra signal that GPUDirect is NOT working: `DCGM_FI_DEV_PCIE_TX/RX_THROUGHPUT` will be high.
+> That means transfers are staging through host DRAM via the CPU — the slow path. When GPUDirect is
+> working correctly, PCIe bandwidth to the CPU is low and NVLink bandwidth is high.
+
 **Requirements for GPUDirect RDMA:**
 1. NVIDIA GPU (A100/H100 or newer recommended)
 2. Mellanox ConnectX-5 or newer NIC
 3. MOFED driver installed
 4. `nvidia-peermem` kernel module loaded (bridges GPUDirect with RDMA verbs)
 5. `NicClusterPolicy` deployed with correct configuration
+
+> **DevOps perspective — what a NIC is in a GPU cluster:**
+>
+> A NIC (Network Interface Card) is the physical hardware that connects a machine to a network.
+> In a standard server it handles regular Ethernet (`eth0`). In a GPU cluster the NIC is a
+> **Mellanox/NVIDIA ConnectX** card — it handles both Ethernet (for RoCE) and InfiniBand, and
+> critically, supports RDMA in hardware.
+>
+> ```
+> Standard NIC (e.g. Intel e810):
+>   - Ethernet only
+>   - All transfers go through CPU/kernel
+>   - Cannot do RDMA
+>
+> ConnectX-6/7 NIC (Mellanox/NVIDIA):
+>   - Ethernet + InfiniBand
+>   - RDMA in hardware (ibverbs API)
+>   - GPUDirect RDMA capable — DMA engine talks directly to GPU HBM
+> ```
+>
+> Full hardware picture on a GPU node:
+> ```
+> GPU (H100) ←—NVLink—→ GPU (H100)
+>      ↕ PCIe                ↕ PCIe
+> ConnectX NIC ←—IB/RoCE—→ ConnectX NIC (on another node)
+>      ↕
+> Arista switch (Block 4)
+> ```
+>
+> In the `NicClusterPolicy`, `vendors: ["15b3"]` is the PCI vendor ID for Mellanox — the device
+> plugin uses it to discover ConnectX NICs on each node. `devices: ["1017"]` narrows it to
+> ConnectX-6 Dx specifically. This is how K8s learns which hardware is present and exposes it
+> as the `rdma/rdma_shared_device_a` schedulable resource.
 
 ---
 
